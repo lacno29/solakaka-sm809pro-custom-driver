@@ -1,0 +1,175 @@
+{
+  "active": "543d5913",
+  "profiles": [
+    {
+      "id": "543d5913",
+      "name": "Default",
+      "match_rules": [],
+      "config": {
+        "buttons": [
+          [
+            112,
+            8,
+            7
+          ],
+          [
+            112,
+            0,
+            31
+          ],
+          [
+            112,
+            0,
+            30
+          ],
+          [
+            16,
+            16,
+            0
+          ],
+          [
+            112,
+            0,
+            33
+          ],
+          [
+            112,
+            0,
+            32
+          ],
+          [
+            112,
+            0,
+            35
+          ],
+          [
+            112,
+            0,
+            34
+          ],
+          [
+            16,
+            8,
+            0
+          ],
+          [
+            48,
+            50,
+            0
+          ],
+          [
+            128,
+            148,
+            1
+          ],
+          [
+            16,
+            1,
+            0
+          ],
+          [
+            16,
+            2,
+            0
+          ],
+          [
+            16,
+            4,
+            0
+          ],
+          [
+            64,
+            2,
+            0
+          ],
+          [
+            64,
+            3,
+            0
+          ]
+        ],
+        "dpi": {
+          "values": [
+            1200,
+            1600,
+            2400,
+            3200,
+            6400,
+            16000
+          ],
+          "colors": [
+            [
+              255,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              255
+            ],
+            [
+              0,
+              255,
+              0
+            ],
+            [
+              255,
+              255,
+              0
+            ],
+            [
+              0,
+              255,
+              255
+            ],
+            [
+              255,
+              0,
+              255
+            ]
+          ],
+          "enabled_count": 6,
+          "selected": 1
+        },
+        "polling_hz": 500,
+        "lod_mm": 2,
+        "lighting": {
+          "mode": 2,
+          "color": [
+            0,
+            0,
+            255
+          ]
+        },
+        "power": {
+          "sleep_min": 20,
+          "move_wakeup": true,
+          "move_lighting": true
+        },
+        "sensor": {
+          "angle_snap": false,
+          "motion_sync": true,
+          "ripple": false
+        }
+      },
+      "created": 0
+    }
+  ],
+  "settings": {
+    "auto_switch": false,
+    "overlay": true,
+    "overlay_show": {
+      "profile": true,
+      "dpi": true,
+      "rate": true
+    },
+    "overlay_pos": "bottom-right",
+    "overlay_opacity": 80,
+    "overlay_scale": 80,
+    "overlay_hold": 2000,
+    "overlay_follow_cursor": false,
+    "overlay_monitor": 0,
+    "profile_sort": "custom"
+  }
+}
