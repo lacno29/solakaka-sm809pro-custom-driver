@@ -1,6 +1,6 @@
 # SM809 Pro App
 
-A lightweight, feature-rich desktop driver and configuration suite for the **SOLAKAKA SM809 Pro** wireless MMO gaming mouse. Built on a fully reverse-engineered HID protocol, this application provides a modern, bloat-free alternative to the official software with powerful capabilities—including seamless **per-application profile auto-switching**.
+A lightweight, feature-rich custom desktop driver and configuration suite for the **SOLAKAKA SM809 Pro** wireless MMO gaming mouse. Built on a fully reverse-engineered HID protocol, this application provides a modern, bloat-free alternative to the official software with powerful capabilities—including seamless **per-application profile auto-switching**.
 
 ---
 
@@ -47,6 +47,20 @@ The official vendor software is clunky and lacks automatic game/application dete
 - Clean dark theme designed for fast navigation without flashy bloat.
 - Minimizes quietly to the Windows system tray.
 - Single-instance enforcement with seamless handoff when relaunched.
+
+---
+
+## ⏱️ Profile Switching & Hardware Timing (Disclaimer & Tip)
+
+Because the SM809 Pro's microcontroller is stateful and communicates over USB HID Feature reports:
+- **Mandatory Hardware Settle Delay**: The mouse firmware requires a mandatory ~60 ms settle delay after every HID feature write (`CMD_DELAY = 60ms`) to prevent the microcontroller from wedging. Macro uploads additionally require a 120 ms delay between data chunks (`MACRO_CHUNK_DELAY = 120ms`).
+- **Smart Diffing**: To make switching as fast as possible, the driver diffs incoming profiles against what is currently applied on the hardware. If an auto-switch only changes DPI or lighting, only those specific packets are sent (taking a fraction of a second).
+- **Why Some Profile Switches Take Longer**: If a profile changes many sections at once—such as all 16 button remappings, lighting, sensor flags, polling rate, and complex multi-key macros—up to 7+ command packets plus chunked macro data must be written sequentially across the HID interface. This can cause a brief delay of around ~0.5s to 1.5s before the device completes writing all changes.
+- **Alt-Tab Debounce**: During automatic profile switching, a 200 ms stability debounce (with a 200 ms polling loop) is deliberately enforced so rapid Alt-Tabbing across open windows does not flood the mouse hardware with back-to-back writes.
+
+> [!TIP]
+> **Enable the On-Screen Overlay HUD for Visual Confirmation:**  
+> In the system tray menu, open **Overlay settings…** and enable the on-screen display. When a profile switch begins, the overlay immediately displays `"Switching to [Profile Name]"` while the packets are in transit, and then flashes the confirmed profile card once the mouse firmware has completely finished applying the changes.
 
 ---
 
