@@ -12,7 +12,7 @@ Categories (from the official menu + verified codes in sm809pro.actions):
 (tuple) or None if cancelled.
 """
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QEvent
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QStackedWidget, QPushButton, QComboBox, QSpinBox,
@@ -20,7 +20,42 @@ from PySide6.QtWidgets import (
 )
 
 from .. import theme
+from ..psf_import import VK_TO_HID
 from sm809pro import actions as A
+
+
+def _build_qt_to_hid():
+    m = {}
+    for i in range(26):
+        m[int(Qt.Key_A) + i] = 0x04 + i
+    for i in range(1, 10):
+        m[int(Qt.Key_0) + i] = 0x1E + (i - 1)
+    m[int(Qt.Key_0)] = 0x27
+    for i in range(12):
+        m[int(Qt.Key_F1) + i] = 0x3A + i
+    for i in range(12):
+        if hasattr(Qt, f"Key_F{13 + i}"):
+            m[int(getattr(Qt, f"Key_F{13 + i}"))] = 0x68 + i
+    m.update({
+        int(Qt.Key_Space): 0x2C, int(Qt.Key_Return): 0x28, int(Qt.Key_Enter): 0x28,
+        int(Qt.Key_Tab): 0x2B, int(Qt.Key_Escape): 0x29, int(Qt.Key_Backspace): 0x2A,
+        int(Qt.Key_Delete): 0x4C, int(Qt.Key_Insert): 0x49, int(Qt.Key_Home): 0x4A,
+        int(Qt.Key_End): 0x4D, int(Qt.Key_PageUp): 0x4B, int(Qt.Key_PageDown): 0x4E,
+        int(Qt.Key_Left): 0x50, int(Qt.Key_Right): 0x4F, int(Qt.Key_Up): 0x52,
+        int(Qt.Key_Down): 0x51, int(Qt.Key_CapsLock): 0x39,
+        int(Qt.Key_Print): 0x46, int(Qt.Key_ScrollLock): 0x47, int(Qt.Key_Pause): 0x48,
+        int(Qt.Key_NumLock): 0x53, int(Qt.Key_Menu): 0x65,
+        int(Qt.Key_Minus): 0x2D, int(Qt.Key_Equal): 0x2E, int(Qt.Key_BracketLeft): 0x2F,
+        int(Qt.Key_BracketRight): 0x30, int(Qt.Key_Backslash): 0x31,
+        int(Qt.Key_Semicolon): 0x33, int(Qt.Key_Apostrophe): 0x34,
+        int(Qt.Key_QuoteLeft): 0x35, int(Qt.Key_Comma): 0x36, int(Qt.Key_Period): 0x37,
+        int(Qt.Key_Slash): 0x38,
+        int(Qt.Key_Asterisk): 0x55, int(Qt.Key_Plus): 0x57,
+    })
+    return m
+
+
+_QT_TO_HID = _build_qt_to_hid()
 
 
 # ---- code -> human label ---------------------------------------------------
@@ -64,9 +99,11 @@ def describe_action(code) -> str:
     named = _NAMED_BY_CODE.get((t, p1, p2))
     if named:
         return A.ACTION_LABELS.get(named, named)
-    if t == 0x70:  # keyboard combo
-        key = _HID_NAME.get(p2, f"0x{p2:02X}").upper()
+    if t == 0x70:  # keyboard combo or modifier-only
         mod = _mod_str(p1)
+        if p2 == 0:
+            return mod if mod else "(none)"
+        key = _HID_NAME.get(p2, f"0x{p2:02X}").upper()
         return f"{mod}+{key}" if mod else f"Key: {key}"
     if t == 0x30:  # fire
         return f"Fire ({p1}ms x{p2 or '∞'})"
@@ -130,8 +167,11 @@ CATEGORY_ORDER = (["Mouse", "DPI", "Quick", "Key Combination", "Fire Key",
 
 class _ComboEditor(QWidget):
     """Editor for a custom keyboard combination (mods + a key)."""
+    changed = Signal()
+
     def __init__(self):
         super().__init__()
+        self._listening = False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 16, 16, 16)
         lay.setSpacing(12)
@@ -141,14 +181,127 @@ class _ComboEditor(QWidget):
         self.alt = QCheckBox("Alt"); self.win = QCheckBox("Win")
         for c in (self.ctrl, self.shift, self.alt, self.win):
             mods.addWidget(c)
+            c.stateChanged.connect(lambda *_: self.changed.emit())
         mods.addStretch(1)
         lay.addLayout(mods)
         lay.addWidget(QLabel("Key"))
+        key_row = QHBoxLayout()
         self.key = QComboBox()
+        self.key.addItem("None", 0)
         for name in A.HID:
             self.key.addItem(name.upper(), A.HID[name])
-        lay.addWidget(self.key)
+        self.key.currentIndexChanged.connect(lambda *_: self.changed.emit())
+        key_row.addWidget(self.key, 1)
+
+        self.detect_btn = QPushButton("Detect Key")
+        self.detect_btn.setCheckable(True)
+        self.detect_btn.setToolTip("Click, then press any key on your keyboard to auto-select it")
+        self.detect_btn.clicked.connect(self._toggle_detect)
+        key_row.addWidget(self.detect_btn)
+        lay.addLayout(key_row)
         lay.addStretch(1)
+
+    def _toggle_detect(self):
+        if self.detect_btn.isChecked():
+            self._start_listening()
+        else:
+            self._stop_listening()
+
+    def _start_listening(self):
+        self._listening = True
+        self.detect_btn.setChecked(True)
+        self.detect_btn.setText("Press any key…")
+        self.detect_btn.setStyleSheet(f"background: {theme.ACCENT}; color: #1a1008; font-weight: bold;")
+        win = self.window()
+        if win:
+            win.installEventFilter(self)
+        self.setFocus()
+
+    def _stop_listening(self):
+        if not self._listening and not self.detect_btn.isChecked():
+            return
+        self._listening = False
+        self.detect_btn.setChecked(False)
+        self.detect_btn.setText("Detect Key")
+        self.detect_btn.setStyleSheet("")
+        win = self.window()
+        if win:
+            try:
+                win.removeEventFilter(self)
+            except Exception:
+                pass
+
+    def hideEvent(self, e):
+        self._stop_listening()
+        super().hideEvent(e)
+
+    def eventFilter(self, watched, event):
+        if self._listening:
+            if event.type() == QEvent.KeyPress:
+                self._handle_key_press(event)
+                return True
+            elif event.type() == QEvent.MouseButtonPress:
+                if watched != self.detect_btn:
+                    self._stop_listening()
+        return super().eventFilter(watched, event)
+
+    def _handle_key_press(self, event):
+        k = event.key()
+        # Modifier pressed alone: select that modifier alone and set Key to None
+        if k in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta):
+            self.ctrl.setChecked(k == Qt.Key_Control)
+            self.shift.setChecked(k == Qt.Key_Shift)
+            self.alt.setChecked(k == Qt.Key_Alt)
+            self.win.setChecked(k == Qt.Key_Meta)
+            self.key.setCurrentIndex(0)  # None
+            self._stop_listening()
+            self.changed.emit()
+            return
+
+        # Regular key pressed: capture modifiers held down at that instant
+        mods = event.modifiers()
+        self.ctrl.setChecked(bool(mods & Qt.ControlModifier))
+        self.shift.setChecked(bool(mods & Qt.ShiftModifier))
+        self.alt.setChecked(bool(mods & Qt.AltModifier))
+        self.win.setChecked(bool(mods & Qt.MetaModifier))
+
+        # Look up HID usage by Qt Key or Windows Virtual Key
+        usage = _QT_TO_HID.get(k)
+        if usage is None and hasattr(event, "nativeVirtualKey"):
+            vk = event.nativeVirtualKey()
+            usage = VK_TO_HID.get(vk)
+
+        if usage is not None:
+            idx = self.key.findData(usage)
+            if idx >= 0:
+                self.key.setCurrentIndex(idx)
+
+        self._stop_listening()
+        self.changed.emit()
+
+    def set_current(self, code):
+        """Pre-populate modifiers and key from an existing action."""
+        if not code or isinstance(code, dict):
+            return
+        t, p1, p2 = (tuple(code) + (0, 0, 0))[:3]
+        if t == 0x60 and p1 == 0 and p2 == 0:  # Disable
+            self.ctrl.setChecked(False)
+            self.shift.setChecked(False)
+            self.alt.setChecked(False)
+            self.win.setChecked(False)
+            self.key.setCurrentIndex(0)  # None
+            return
+        if t != 0x70:
+            return
+        self.ctrl.setChecked(bool(p1 & A.MOD_CTRL))
+        self.shift.setChecked(bool(p1 & A.MOD_SHIFT))
+        self.alt.setChecked(bool(p1 & A.MOD_ALT))
+        self.win.setChecked(bool(p1 & A.MOD_WIN))
+        idx = self.key.findData(p2)
+        if idx >= 0:
+            self.key.setCurrentIndex(idx)
+        elif p2 == 0:
+            self.key.setCurrentIndex(0)
 
     def code(self):
         mask = 0
@@ -156,7 +309,12 @@ class _ComboEditor(QWidget):
         if self.shift.isChecked(): mask |= A.MOD_SHIFT
         if self.alt.isChecked():   mask |= A.MOD_ALT
         if self.win.isChecked():   mask |= A.MOD_WIN
-        return A.kb(self.key.currentData(), mask)
+        k = self.key.currentData() or 0
+        if mask == 0 and k == 0:
+            return A.BTN["disable"]
+        return A.kb(k, mask)
+
+
 
 
 class _FireEditor(QWidget):
@@ -362,19 +520,53 @@ class ActionPicker(QDialog):
             default_btn.clicked.connect(self._accept_default)
             footer.addWidget(default_btn)
         cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
-        ok = QPushButton("OK"); ok.setObjectName("ok"); ok.clicked.connect(self._accept)
-        footer.addWidget(cancel); footer.addWidget(ok)
+        self.ok_btn = QPushButton("OK"); self.ok_btn.setObjectName("ok"); self.ok_btn.clicked.connect(self._accept)
+        footer.addWidget(cancel); footer.addWidget(self.ok_btn)
         root.addLayout(footer)
 
-        # if editing an existing macro / run-app binding, open on its category
+        # Wire live preview updates
+        self.list_pane.currentItemChanged.connect(lambda *_: self._update_preview())
+        self.combo_editor.changed.connect(self._update_preview)
+        self.fire_editor.interval.valueChanged.connect(lambda *_: self._update_preview())
+        self.fire_editor.count.valueChanged.connect(lambda *_: self._update_preview())
+        self.macro_editor.macro.currentIndexChanged.connect(lambda *_: self._update_preview())
+        self.macro_editor.mode.currentIndexChanged.connect(lambda *_: self._update_preview())
+        self.macro_editor.count.valueChanged.connect(lambda *_: self._update_preview())
+        self.runapp_editor.path.textChanged.connect(lambda *_: self._update_preview())
+
+        # Select initial category and pre-populate if needed
+        matched = False
         if isinstance(current_code, dict) and "macro" in current_code:
             self.cats.setCurrentRow(CATEGORY_ORDER.index("Macro"))
             self.macro_editor.set_current(current_code)
+            matched = True
         elif isinstance(current_code, dict) and "runapp" in current_code:
             self.cats.setCurrentRow(CATEGORY_ORDER.index("Run App"))
             self.runapp_editor.set_current(current_code)
-        else:
+            matched = True
+        elif isinstance(current_code, (tuple, list)) and len(current_code) >= 3 and current_code[0] == 0x70 and tuple(current_code[:3]) not in _NAMED_BY_CODE:
+            self.cats.setCurrentRow(CATEGORY_ORDER.index("Key Combination"))
+            self.combo_editor.set_current(current_code)
+            matched = True
+        elif isinstance(current_code, (tuple, list)) and len(current_code) >= 3 and current_code[0] == 0x30 and tuple(current_code[:3]) not in _NAMED_BY_CODE:
+            self.cats.setCurrentRow(CATEGORY_ORDER.index("Fire Key"))
+            self.fire_editor.interval.setValue(current_code[1])
+            self.fire_editor.count.setValue(current_code[2])
+            matched = True
+        elif isinstance(current_code, (tuple, list)) and len(current_code) >= 3:
+            target = tuple(current_code[:3])
+            for cat_name, items in ACTION_TREE.items():
+                for idx, (label, code) in enumerate(items):
+                    if tuple(code) == target:
+                        self.cats.setCurrentRow(CATEGORY_ORDER.index(cat_name))
+                        self.list_pane.setCurrentRow(idx)
+                        matched = True
+                        break
+                if matched:
+                    break
+        if not matched:
             self.cats.setCurrentRow(0)
+        self._update_preview()
 
     def _accept_default(self):
         """Resolve this physical button's factory-default code and accept it."""
@@ -385,6 +577,15 @@ class ActionPicker(QDialog):
         if 0 <= idx < len(defaults):
             self._result = tuple(defaults[idx])
             self.accept()
+
+    def _update_preview(self):
+        code = self._current_code()
+        if code is not None:
+            self.preview.setText(describe_action(code))
+            self.ok_btn.setEnabled(True)
+        else:
+            self.preview.setText("(none)")
+            self.ok_btn.setEnabled(False)
 
     def _on_cat(self, row):
         name = CATEGORY_ORDER[row]
@@ -399,6 +600,7 @@ class ActionPicker(QDialog):
                 self.list_pane.addItem(it)
             self.list_pane.setCurrentRow(0)
             self.stack.setCurrentIndex(0)
+        self._update_preview()
 
     def _current_code(self):
         idx = self.stack.currentIndex()

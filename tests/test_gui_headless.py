@@ -538,6 +538,95 @@ check("macro panel editor scroll background is not white", QColor(img.pixel(500,
 check("macro list keeps its border", any(img.pixelColor(x, 250).name() == theme.BORDER.lower() for x in range(200, 225)))
 check("macro events table keeps its border", any(img.pixelColor(x, 450).name() == theme.BORDER.lower() for x in range(460, 485)))
 
+# ActionPicker Key Combination: "None" option, modifier-only, and comprehensive keys
+from app.widgets.action_picker import describe_action, ActionPicker, _ComboEditor
+check("describe_action Alt only", describe_action(A.kb(0, A.MOD_ALT)) == "Alt")
+check("describe_action Ctrl only", describe_action(A.kb(0, A.MOD_CTRL)) == "Ctrl")
+check("describe_action Shift only", describe_action(A.kb(0, A.MOD_SHIFT)) == "Shift")
+check("describe_action Win only", describe_action(A.kb(0, A.MOD_WIN)) == "Win")
+check("describe_action Ctrl+Shift only", describe_action(A.kb(0, A.MOD_CTRL | A.MOD_SHIFT)) == "Ctrl+Shift")
+check("describe_action 0x70 empty", describe_action((0x70, 0, 0)) == "(none)")
+
+# Expanded keyboard keys in describe_action
+check("describe_action DEL", describe_action(A.kb(A.HID["del"])) == "Key: DEL")
+check("describe_action Ctrl+DEL", describe_action(A.kb(A.HID["del"], A.MOD_CTRL)) == "Ctrl+DEL")
+check("describe_action HOME", describe_action(A.kb(A.HID["home"])) == "Key: HOME")
+check("describe_action END", describe_action(A.kb(A.HID["end"])) == "Key: END")
+check("describe_action PAGE UP", describe_action(A.kb(A.HID["page up"])) == "Key: PAGE UP")
+check("describe_action PAGE DOWN", describe_action(A.kb(A.HID["page down"])) == "Key: PAGE DOWN")
+check("describe_action BACKSPACE", describe_action(A.kb(A.HID["backspace"])) == "Key: BACKSPACE")
+check("describe_action INSERT", describe_action(A.kb(A.HID["insert"])) == "Key: INSERT")
+
+# ActionPicker with modifier-only action
+dlg = ActionPicker((0x70, A.MOD_ALT, 0))
+check("ActionPicker opens on Key Combination for Alt", dlg.cats.currentItem().text() == "Key Combination")
+check("ActionPicker Alt is checked", dlg.combo_editor.alt.isChecked())
+check("ActionPicker Ctrl is unchecked", not dlg.combo_editor.ctrl.isChecked())
+check("ActionPicker Key is None (data=0)", dlg.combo_editor.key.currentData() == 0)
+check("ActionPicker code is (0x70, 4, 0)", dlg.combo_editor.code() == (0x70, 0x04, 0x00))
+check("ActionPicker preview is 'Alt'", dlg.preview.text() == "Alt")
+check("ActionPicker OK button enabled", dlg.ok_btn.isEnabled())
+
+# Uncheck modifier with Key=None -> defaults to "Disable" (0x60, 0x00, 0x00)
+dlg.combo_editor.alt.setChecked(False)
+check("ActionPicker uncheck Alt -> code is Disable", dlg.combo_editor.code() == A.BTN["disable"])
+check("ActionPicker uncheck Alt -> OK button enabled", dlg.ok_btn.isEnabled())
+check("ActionPicker uncheck Alt -> preview is 'Disable'", dlg.preview.text() == "Disable")
+
+# Check Ctrl -> valid Ctrl-only action
+dlg.combo_editor.ctrl.setChecked(True)
+check("ActionPicker check Ctrl -> code is (0x70, 1, 0)", dlg.combo_editor.code() == (0x70, 0x01, 0x00))
+check("ActionPicker check Ctrl -> preview is 'Ctrl'", dlg.preview.text() == "Ctrl")
+check("ActionPicker check Ctrl -> OK button enabled", dlg.ok_btn.isEnabled())
+
+# Detect Key feature
+from PySide6.QtCore import Qt, QEvent
+from PySide6.QtGui import QKeyEvent
+dlg.combo_editor.detect_btn.click()
+check("Detect Key button enters listening mode", dlg.combo_editor._listening)
+check("Detect Key button text shows 'Press any key…'", dlg.combo_editor.detect_btn.text() == "Press any key…")
+
+# Simulate pressing Delete
+evt_del = QKeyEvent(QEvent.KeyPress, int(Qt.Key_Delete), Qt.NoModifier)
+dlg.combo_editor._handle_key_press(evt_del)
+check("Detect Delete -> stops listening", not dlg.combo_editor._listening)
+check("Detect Delete -> button text restored", dlg.combo_editor.detect_btn.text() == "Detect Key")
+check("Detect Delete -> Key dropdown selected DEL", dlg.combo_editor.key.currentData() == A.HID["del"])
+check("Detect Delete -> code is (0x70, 0, 0x4C)", dlg.combo_editor.code() == (0x70, 0x00, 0x4C))
+check("Detect Delete -> preview is 'Key: DEL'", dlg.preview.text() == "Key: DEL")
+
+# Simulate pressing Ctrl+End
+evt_combo = QKeyEvent(QEvent.KeyPress, int(Qt.Key_End), Qt.ControlModifier)
+dlg.combo_editor._handle_key_press(evt_combo)
+check("Detect Ctrl+End -> Ctrl is checked", dlg.combo_editor.ctrl.isChecked())
+check("Detect Ctrl+End -> Key is END", dlg.combo_editor.key.currentData() == A.HID["end"])
+check("Detect Ctrl+End -> preview is 'Ctrl+END'", dlg.preview.text() == "Ctrl+END")
+
+# Simulate pressing Shift alone
+evt_shift = QKeyEvent(QEvent.KeyPress, int(Qt.Key_Shift), Qt.NoModifier)
+dlg.combo_editor._handle_key_press(evt_shift)
+check("Detect Shift alone -> Shift checked", dlg.combo_editor.shift.isChecked())
+check("Detect Shift alone -> Ctrl unchecked", not dlg.combo_editor.ctrl.isChecked())
+check("Detect Shift alone -> Key is None", dlg.combo_editor.key.currentData() == 0)
+check("Detect Shift alone -> preview is 'Shift'", dlg.preview.text() == "Shift")
+# Macro Panel KEY_INSERT_CHOICES comprehensive keys
+from app.panels.macro_panel import KEY_INSERT_CHOICES
+macro_key_codes = {code for _, code in KEY_INSERT_CHOICES}
+check("macro choices has Delete", 0x4C in macro_key_codes)
+check("macro choices has Insert", 0x49 in macro_key_codes)
+check("macro choices has Home", 0x4A in macro_key_codes)
+check("macro choices has End", 0x4D in macro_key_codes)
+check("macro choices has Page Up", 0x4B in macro_key_codes)
+check("macro choices has Page Down", 0x4E in macro_key_codes)
+check("macro choices has Print Screen", 0x46 in macro_key_codes)
+check("macro choices has Pause", 0x48 in macro_key_codes)
+check("macro choices has F13", 0x68 in macro_key_codes)
+check("macro choices has F24", 0x73 in macro_key_codes)
+check("macro choices has Num Enter", 0x58 in macro_key_codes)
+check("macro choices has Menu", 0x65 in macro_key_codes)
+
+dlg.close()
+
 w.ctrl.shutdown()
 print(f"\n{('ALL GOOD' if fails == 0 else str(fails) + ' FAILED')}")
 sys.exit(1 if fails else 0)

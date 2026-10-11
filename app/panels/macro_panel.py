@@ -50,6 +50,9 @@ def _build_qt_to_hid():
     m[int(Qt.Key_0)] = 0x27
     for i in range(12):
         m[int(Qt.Key_F1) + i] = 0x3A + i
+    for i in range(12):
+        if hasattr(Qt, f"Key_F{13 + i}"):
+            m[int(getattr(Qt, f"Key_F{13 + i}"))] = 0x68 + i
     m.update({
         int(Qt.Key_Space): 0x2C, int(Qt.Key_Return): 0x28, int(Qt.Key_Enter): 0x28,
         int(Qt.Key_Tab): 0x2B, int(Qt.Key_Escape): 0x29, int(Qt.Key_Backspace): 0x2A,
@@ -57,6 +60,8 @@ def _build_qt_to_hid():
         int(Qt.Key_End): 0x4D, int(Qt.Key_PageUp): 0x4B, int(Qt.Key_PageDown): 0x4E,
         int(Qt.Key_Left): 0x50, int(Qt.Key_Right): 0x4F, int(Qt.Key_Up): 0x52,
         int(Qt.Key_Down): 0x51, int(Qt.Key_CapsLock): 0x39,
+        int(Qt.Key_Print): 0x46, int(Qt.Key_ScrollLock): 0x47, int(Qt.Key_Pause): 0x48,
+        int(Qt.Key_NumLock): 0x53, int(Qt.Key_Menu): 0x65,
         int(Qt.Key_Control): 0xE0, int(Qt.Key_Shift): 0xE1, int(Qt.Key_Alt): 0xE2,
         int(Qt.Key_Meta): 0xE3,
         int(Qt.Key_Minus): 0x2D, int(Qt.Key_Equal): 0x2E, int(Qt.Key_BracketLeft): 0x2F,
@@ -64,6 +69,7 @@ def _build_qt_to_hid():
         int(Qt.Key_Semicolon): 0x33, int(Qt.Key_Apostrophe): 0x34,
         int(Qt.Key_QuoteLeft): 0x35, int(Qt.Key_Comma): 0x36, int(Qt.Key_Period): 0x37,
         int(Qt.Key_Slash): 0x38,
+        int(Qt.Key_Asterisk): 0x55, int(Qt.Key_Plus): 0x57,
     })
     return m
 
@@ -72,11 +78,20 @@ QT_TO_HID = _build_qt_to_hid()
 
 
 def _build_usage_names():
-    n = {v: k.upper() for k, v in A.HID.items()}
+    n = {v: k.title() for k, v in A.HID.items()}
+    for i in range(26):
+        n[0x04 + i] = chr(ord("A") + i)
+    for i in range(1, 25):
+        usage = (0x39 + i) if i <= 12 else (0x68 + (i - 13))
+        n[usage] = f"F{i}"
     n.update({
         0xE0: "Ctrl", 0xE1: "Shift", 0xE2: "Alt", 0xE3: "Win",
-        0x2A: "Backspace", 0x4C: "Delete", 0x49: "Insert", 0x4A: "Home",
-        0x4D: "End", 0x4B: "PgUp", 0x4E: "PgDn", 0x39: "Caps",
+        0x28: "Enter", 0x29: "Esc", 0x2A: "Backspace", 0x2B: "Tab", 0x2C: "Space",
+        0x4C: "Delete", 0x49: "Insert", 0x4A: "Home", 0x4D: "End",
+        0x4B: "PgUp", 0x4E: "PgDn", 0x46: "PrtSc", 0x48: "Pause",
+        0x50: "Left", 0x4F: "Right", 0x52: "Up", 0x51: "Down",
+        0x39: "Caps", 0x47: "ScrollLock", 0x53: "NumLock",
+        0x65: "Menu",
         0x2D: "-", 0x2E: "=", 0x2F: "[", 0x30: "]", 0x31: "\\", 0x33: ";",
         0x34: "'", 0x35: "`", 0x36: ",", 0x37: ".", 0x38: "/",
     })
@@ -101,12 +116,29 @@ def _key_insert_choices():
     out = [("Ctrl", 0xE0), ("Shift", 0xE1), ("Alt", 0xE2), ("Win", 0xE3)]
     out += [(chr(ord("A") + i), 0x04 + i) for i in range(26)]
     out += [(str(d), A.HID[str(d)]) for d in [1, 2, 3, 4, 5, 6, 7, 8, 9, 0]]
-    out += [("Enter", 0x28), ("Tab", 0x2B), ("Space", 0x2C), ("Esc", 0x29),
-            ("Backspace", 0x2A), ("Delete", 0x4C),
-            ("Left", 0x50), ("Right", 0x4F), ("Up", 0x52), ("Down", 0x51)]
+    out += [
+        ("Enter", 0x28), ("Tab", 0x2B), ("Space", 0x2C), ("Esc", 0x29),
+        ("Backspace", 0x2A), ("Delete", 0x4C), ("Insert", 0x49),
+        ("Home", 0x4A), ("End", 0x4D), ("Page Up", 0x4B), ("Page Down", 0x4E),
+        ("Print Screen", 0x46), ("Pause", 0x48),
+        ("Up", 0x52), ("Down", 0x51), ("Left", 0x50), ("Right", 0x4F),
+    ]
     out += [(f"F{i}", 0x39 + i) for i in range(1, 13)]
-    out += [("-", 0x2D), ("=", 0x2E), ("[", 0x2F), ("]", 0x30), ("\\", 0x31),
-            (";", 0x33), ("'", 0x34), ("`", 0x35), (",", 0x36), (".", 0x37), ("/", 0x38)]
+    out += [(f"F{i}", 0x68 + (i - 13)) for i in range(13, 25)]
+    out += [
+        ("-", 0x2D), ("=", 0x2E), ("[", 0x2F), ("]", 0x30), ("\\", 0x31),
+        (";", 0x33), ("'", 0x34), ("`", 0x35), (",", 0x36), (".", 0x37), ("/", 0x38),
+    ]
+    out += [
+        ("Caps Lock", 0x39), ("Scroll Lock", 0x47), ("Num Lock", 0x53),
+    ]
+    out += [
+        ("Num /", 0x54), ("Num *", 0x55), ("Num -", 0x56), ("Num +", 0x57), ("Num Enter", 0x58),
+        ("Num 1", 0x59), ("Num 2", 0x5A), ("Num 3", 0x5B), ("Num 4", 0x5C), ("Num 5", 0x5D),
+        ("Num 6", 0x5E), ("Num 7", 0x5F), ("Num 8", 0x60), ("Num 9", 0x61), ("Num 0", 0x62),
+        ("Num .", 0x63),
+    ]
+    out += [("Menu", 0x65)]
     return out
 
 
