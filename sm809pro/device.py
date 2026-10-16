@@ -61,56 +61,94 @@ def detect_modes(vid=P.VID):
     `configurable` is True if the report-6 command interface is present.
 
     2.4GHz (0x026F) and wired (0x026E) are known PIDs. Anything else on the
-    Elan VID is reported as unknown/bluetooth so the caller can decide.
+    Elan VID (or devices matching SM809/Solakaka) is reported as bluetooth.
     """
     if hid is None:
         return []
     out = []
-    seen_pids = set()
+    seen = set()
 
-    def classify(pid):
-        if pid == P.PID_WIRELESS:
-            return "2.4GHz"
-        if pid == P.PID_WIRED:
-            return "wired"
-        return "bluetooth"  # best guess for any other Elan PID on this device
+    def classify(v, p):
+        if v == vid:
+            if p == P.PID_WIRELESS:
+                return "2.4GHz"
+            if p == P.PID_WIRED:
+                return "wired"
+        return "bluetooth"
 
-    # known PIDs first, then any other PID under the VID (catches BT)
+    # Known PIDs first, then any other PID under the target VID (catches standard BT)
     all_devs = hid.enumerate(vid, 0)
     pids = [P.PID_WIRELESS, P.PID_WIRED] + sorted(
         {d.get("product_id") for d in all_devs} - {P.PID_WIRELESS, P.PID_WIRED}
     )
     for pid in pids:
-        if pid in seen_pids or pid is None:
+        if (vid, pid) in seen or pid is None:
             continue
-        seen_pids.add(pid)
+        seen.add((vid, pid))
         devs = hid.enumerate(vid, pid)
         if not devs:
             continue
         out.append({
+            "vid": vid,
             "pid": pid,
-            "connection": classify(pid),
+            "connection": classify(vid, pid),
             "configurable": _has_command_interface(devs),
             "devs": devs,
         })
+
+    # Also inspect global HID devices in case Bluetooth reports another VID with SM809/Solakaka
+    try:
+        global_devs = hid.enumerate(0, 0)
+    except Exception:
+        global_devs = []
+    for d in global_devs:
+        v = d.get("vendor_id")
+        p = d.get("product_id")
+        if (v, p) in seen or p is None or v is None:
+            continue
+        prod = (d.get("product_string") or "").lower()
+        mfg = (d.get("manufacturer_string") or "").lower()
+        if "sm809" in prod or "solakaka" in prod or "sm809" in mfg or "solakaka" in mfg:
+            seen.add((v, p))
+            devs = hid.enumerate(v, p)
+            if devs:
+                out.append({
+                    "vid": v,
+                    "pid": p,
+                    "connection": classify(v, p),
+                    "configurable": _has_command_interface(devs),
+                    "devs": devs,
+                })
     return out
 
 
-def choose_mode(modes, prefer=("2.4GHz", "wired")):
+def choose_mode(modes, prefer=("wired", "bluetooth", "2.4GHz")):
     """
-    From detect_modes() output, pick the best CONFIGURABLE mode.
-    Preference order: 2.4GHz, then wired (both validated). A configurable
-    Bluetooth mode (if it ever has the command interface) is used only as a
-    last resort. Returns a mode dict or None.
+    From detect_modes() output, pick the best mode.
+    Priority order:
+      1. wired: USB-C cable physically connected (charging + full config).
+      2. bluetooth: mouse actively connected over Bluetooth (implies hardware switch is at BT).
+      3. 2.4GHz: wireless USB dongle is plugged in.
+    If configurable modes exist, prefer them. If only non-configurable modes exist
+    (e.g. read-only Bluetooth), fallback to them so the device is recognized.
     """
-    configurable = [m for m in modes if m["configurable"]]
-    if not configurable:
+    if not modes:
         return None
-    for want in prefer:
-        for m in configurable:
-            if m["connection"] == want:
-                return m
-    return configurable[0]
+    # 1. If wired is connected, it always takes highest priority
+    wired = [m for m in modes if m["connection"] == "wired"]
+    if wired:
+        return wired[0]
+    # 2. If bluetooth is active, the physical mouse switch is in BT mode
+    bt = [m for m in modes if m["connection"] == "bluetooth"]
+    if bt:
+        cfg_bt = [m for m in bt if m.get("configurable")]
+        return cfg_bt[0] if cfg_bt else bt[0]
+    # 3. If 2.4GHz dongle is present
+    wl = [m for m in modes if m["connection"] == "2.4GHz"]
+    if wl:
+        return wl[0]
+    # Fallback
+    return modes[0]
 
 
 class SM809Pro:
@@ -124,6 +162,7 @@ class SM809Pro:
         self._seq = 1
         self._lock = threading.RLock()
         self.connection = None      # "2.4GHz" | "wired" | "bluetooth" | None
+        self.configurable = True    # False if opened on an interface without command channel
         self.interface_info = None
         self.detected_modes = []    # list from detect_modes() at last open()
         self.last_error = None      # human-readable reason open() failed
@@ -133,11 +172,11 @@ class SM809Pro:
         """
         Detect the current connection mode and open the command interface.
 
-        Honest about tri-mode: 2.4GHz and wired both expose the report-6
-        command interface and are supported. Bluetooth typically does NOT
-        expose it (config over BT isn't available); if only BT is present we
-        refuse with a clear last_error so the GUI can tell the user to switch
-        to 2.4GHz or plug in USB-C.
+        Supports tri-mode:
+        - 2.4GHz and wired both expose the report-6 command interface and are supported.
+        - Bluetooth is detected and supported. If Bluetooth exposes the command channel,
+          it can be configured; if not, it opens in read-only mode so the GUI can
+          recognize and monitor the mouse.
         """
         if hid is None:
             raise RuntimeError("hidapi not available")
@@ -149,23 +188,19 @@ class SM809Pro:
             if not devs:
                 self.last_error = f"PID {self.pid:#06x} not found."
                 return False
-            if not _has_command_interface(devs):
-                self.last_error = (f"PID {self.pid:#06x} has no command interface "
-                                   f"(can't configure in this mode).")
-                return False
-            return self._open_devs(devs, self.pid)
+            is_cfg = _has_command_interface(devs)
+            self.configurable = is_cfg
+            return self._open_devs(devs, self.pid, configurable=is_cfg)
 
         # Auto-detect across all modes.
         self.detected_modes = detect_modes(self.vid)
         if not self.detected_modes:
-            self.last_error = ("Device not found. Plug it in / insert the 2.4GHz "
-                               "dongle, and close the official software.")
+            self.last_error = ("Device not found. Turn on the mouse or plug in the "
+                               "2.4GHz dongle / USB-C cable.")
             return False
 
         chosen = choose_mode(self.detected_modes)
         if chosen is None:
-            # Something is connected, but nothing configurable -> almost certainly
-            # Bluetooth-only. Be explicit.
             conns = ", ".join(sorted({m["connection"] for m in self.detected_modes}))
             self.last_error = (
                 f"Connected via {conns}, which doesn't expose the configuration "
@@ -174,13 +209,17 @@ class SM809Pro:
             )
             return False
 
+        self.vid = chosen.get("vid", self.vid)
         self.pid = chosen["pid"]
-        return self._open_devs(chosen["devs"], chosen["pid"], chosen["connection"])
+        self.configurable = chosen.get("configurable", True)
+        return self._open_devs(chosen["devs"], chosen["pid"], chosen["connection"],
+                               configurable=self.configurable)
 
-    def _open_devs(self, devs, pid, connection=None) -> bool:
+    def _open_devs(self, devs, pid, connection=None, configurable=True) -> bool:
         self.connection = connection or (
             "2.4GHz" if pid == P.PID_WIRELESS
             else "wired" if pid == P.PID_WIRED else "bluetooth")
+        self.configurable = configurable
         tgt = pick_control_interface(devs)
         self.interface_info = tgt
         self._dev = hid.device()
@@ -207,6 +246,8 @@ class SM809Pro:
                     self._dev.close()
                 finally:
                     self._dev = None
+            self.connection = None
+            self.interface_info = None
 
     @property
     def is_open(self) -> bool:
@@ -227,6 +268,8 @@ class SM809Pro:
 
     def _send_packet(self, packet: bytes) -> bool:
         """Prepend report id, write, settle. Returns True on a clean write."""
+        if not self.configurable:
+            return False
         send_buf = bytes([P.REPORT_ID_CMD]) + packet
         with self._lock:
             if self._dev is None:
@@ -253,14 +296,17 @@ class SM809Pro:
             raise ValueError(f"need {P.PACKET_LEN} bytes, got {len(payload31)}")
         return self._send_packet(bytes(payload31))
 
-    def keepalive_poll(self):
-        """A harmless read used by a background keep-alive thread."""
+    def keepalive_poll(self) -> bool:
+        """A harmless read used by a background keep-alive thread.
+        Returns True if successful, False if the device handle is dead/unresponsive."""
         with self._lock:
-            if self._dev:
-                try:
-                    self._dev.get_feature_report(P.REPORT_ID_CMD, 32)
-                except Exception:
-                    pass
+            if not self._dev:
+                return False
+            try:
+                self._dev.get_feature_report(P.REPORT_ID_CMD, 32)
+                return True
+            except Exception:
+                return False
 
     # -- status ---------------------------------------------------------------
     def read_status(self):

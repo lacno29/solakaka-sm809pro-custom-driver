@@ -625,8 +625,99 @@ check("macro choices has F24", 0x73 in macro_key_codes)
 check("macro choices has Num Enter", 0x58 in macro_key_codes)
 check("macro choices has Menu", 0x65 in macro_key_codes)
 
+# TopBar connection UI tests for Bluetooth
+w.topbar.set_connection({"connection": "bluetooth", "configurable": True})
+check("TopBar Bluetooth (configurable) text", w.topbar.conn_pill.text() == "● Bluetooth")
+check("TopBar Bluetooth (configurable) tooltip", "Connected via Bluetooth" in w.topbar.conn_pill.toolTip())
+
+w.topbar.set_connection({"connection": "bluetooth", "configurable": False})
+check("TopBar Bluetooth (read-only) text", w.topbar.conn_pill.text() == "● Bluetooth")
+check("TopBar Bluetooth (read-only) tooltip mentions read-only", "read-only" in w.topbar.conn_pill.toolTip())
+
+w.topbar.set_disconnected()
+check("TopBar disconnected text", w.topbar.conn_pill.text() == "● not connected")
+check("TopBar disconnected tooltip mentions searching", "Searching for connection" in w.topbar.conn_pill.toolTip())
+
+w.topbar.set_offline()
+check("TopBar 2.4G offline text", w.topbar.conn_pill.text() == "● mouse offline")
+check("TopBar 2.4G offline tooltip mentions offline", "mouse is offline" in w.topbar.conn_pill.toolTip())
+
+# DeviceController auto-detection & mode-switching tests
+from app.controller import DeviceController
+from app import controller as _app_ctrl
+
+old_status_cls = _app_ctrl.StatusListener
+class MockStatusListener:
+    _alive = True
+    def __init__(self, *args, **kwargs): pass
+    def start(self): pass
+    def stop(self): pass
+_app_ctrl.StatusListener = MockStatusListener
+
+ctrl = DeviceController()
+connected_events = []
+disconnected_events = []
+ctrl.connected.connect(lambda info: connected_events.append(info))
+ctrl.disconnected.connect(lambda: disconnected_events.append(True))
+
+# 1. Test connect attempt when device is available
+ctrl._dev._dev = object()
+ctrl._dev.connection = "bluetooth"
+ctrl._dev.configurable = True
+ctrl._dev.open = lambda: True
+ctrl._dev.pid = 0x0270
+ctrl._dev.vid = 0x04F3
+
+ctrl._attempt_connect()
+check("DeviceController emits connected on attach", len(connected_events) == 1)
+check("DeviceController connected info has bluetooth", connected_events[-1]["connection"] == "bluetooth")
+check("DeviceController connected info is configurable", connected_events[-1]["configurable"] is True)
+check("DeviceController is_connected is True", ctrl._is_connected is True)
+
+# 2. Test keepalive failure triggers teardown and disconnected signal
+ctrl._dev.keepalive_poll = lambda: False
+ctrl._last_keepalive = 0.0  # force keepalive to run immediately
+ctrl._maintain_connection()
+check("DeviceController emits disconnected on keepalive failure", len(disconnected_events) == 1)
+check("DeviceController is_connected is False after disconnect", ctrl._is_connected is False)
+
+# 3. Test queue draining while disconnected
+done_events = []
+ctrl.command_done.connect(lambda m, ok: done_events.append((m, ok)))
+ctrl.call("set_dpi", [800, 1600])
+ctrl._drain_queue()
+check("Drained queue emits command_done with False", done_events == [("set_dpi", False)])
+check("Busy is False after draining", ctrl._q.empty())
+
+# 4. Test mode-switching: 2.4GHz offline -> Bluetooth available triggers switch
+ctrl._dev.open = lambda: True
+ctrl._dev.connection = "2.4GHz"
+ctrl._dev._dev = object()
+ctrl._dev.configurable = True
+ctrl._is_connected = True
+mock_status = MockStatusListener()
+mock_status._alive = False
+ctrl._status = mock_status
+
+# Mock detect_modes to return Bluetooth
+from sm809pro import device as _dev_module
+orig_detect = _dev_module.detect_modes
+_dev_module.detect_modes = lambda vid=0x04F3: [{"connection": "bluetooth", "pid": 0x0270, "configurable": True, "devs": []}]
+_app_ctrl.detect_modes = _dev_module.detect_modes
+
+ctrl._last_mode_check = 0.0  # force mode check
+ctrl._maintain_connection()
+check("Mode switch tears down 2.4GHz when Bluetooth appears", ctrl._is_connected is False)
+
+_dev_module.detect_modes = orig_detect
+_app_ctrl.detect_modes = orig_detect
+_app_ctrl.StatusListener = old_status_cls
+
+ctrl.shutdown()
 dlg.close()
 
 w.ctrl.shutdown()
+w.close()
 print(f"\n{('ALL GOOD' if fails == 0 else str(fails) + ' FAILED')}")
-sys.exit(1 if fails else 0)
+sys.exit(0 if fails == 0 else 1)
+

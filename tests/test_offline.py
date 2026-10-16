@@ -156,5 +156,54 @@ check("lowercase 'hi' unchanged (no shift events)",
       len(M.text_to_events("hi")) == 4
       and all(e["keycode"] != 0xE1 for e in M.text_to_events("hi")))
 
+print("== mode selection & Bluetooth priority ==")
+from sm809pro.device import choose_mode
+
+check("empty modes returns None", choose_mode([]) is None)
+
+m_wl = {"connection": "2.4GHz", "pid": 0x026F, "configurable": True, "devs": []}
+m_wired = {"connection": "wired", "pid": 0x026E, "configurable": True, "devs": []}
+m_bt_cfg = {"connection": "bluetooth", "pid": 0x0270, "configurable": True, "devs": []}
+m_bt_ro = {"connection": "bluetooth", "pid": 0x0270, "configurable": False, "devs": []}
+
+check("only 2.4GHz -> picks 2.4GHz", choose_mode([m_wl]) == m_wl)
+check("only wired -> picks wired", choose_mode([m_wired]) == m_wired)
+check("only bluetooth (cfg) -> picks bluetooth", choose_mode([m_bt_cfg]) == m_bt_cfg)
+check("only bluetooth (read-only) -> picks bluetooth fallback", choose_mode([m_bt_ro]) == m_bt_ro)
+
+# When 2.4GHz dongle is plugged in, but mouse is active on Bluetooth:
+check("2.4GHz + Bluetooth -> prefers active Bluetooth",
+      choose_mode([m_wl, m_bt_cfg])["connection"] == "bluetooth")
+check("2.4GHz + Bluetooth (read-only) -> prefers active Bluetooth over idle dongle",
+      choose_mode([m_wl, m_bt_ro])["connection"] == "bluetooth")
+
+# When wired USB is plugged in, wired always takes top priority:
+check("wired + Bluetooth + 2.4GHz -> prefers wired",
+      choose_mode([m_wl, m_bt_cfg, m_wired])["connection"] == "wired")
+
+print("== keepalive_poll health detection ==")
+d = fresh()
+class DummyDev:
+    def __init__(self, should_fail=False):
+        self.should_fail = should_fail
+    def get_feature_report(self, r_id, length):
+        if self.should_fail:
+            raise OSError("device disconnected")
+        return bytes([r_id] + [0] * (length - 1))
+
+d._dev = DummyDev(should_fail=False)
+check("keepalive_poll returns True on healthy handle", d.keepalive_poll() is True)
+
+d._dev = DummyDev(should_fail=True)
+check("keepalive_poll returns False on dead/disconnected handle", d.keepalive_poll() is False)
+
+d._dev = None
+check("keepalive_poll returns False when device is closed", d.keepalive_poll() is False)
+
+d = fresh()
+d.configurable = False
+check("_send_packet returns False safely when not configurable", SM809Pro._send_packet(d, b"test") is False)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
+

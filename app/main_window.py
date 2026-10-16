@@ -131,11 +131,16 @@ class TopBar(QFrame):
         self.conn_pill.setText(f"● {label}")
         self.conn_pill.setStyleSheet(self._conn_style(theme.GOOD))
         self._conn_label = label
+        if not info.get("configurable", True):
+            self.conn_pill.setToolTip(f"Connected via {label} (read-only; settings changes require 2.4GHz dongle or USB wired)")
+        else:
+            self.conn_pill.setToolTip(f"Connected via {label}")
 
     def set_offline(self):
         # dongle/cable present but the mouse isn't responding
         self.conn_pill.setText("● mouse offline")
         self.conn_pill.setStyleSheet(self._conn_style(theme.WARN))
+        self.conn_pill.setToolTip("2.4GHz dongle is plugged in, but mouse is offline or switched to Bluetooth.")
         self.battery.setText("")
         self.dpi_readout.setText("—")
         self.rate_readout.setText("—")
@@ -143,6 +148,7 @@ class TopBar(QFrame):
     def set_disconnected(self):
         self.conn_pill.setText("● not connected")
         self.conn_pill.setStyleSheet(self._conn_style(theme.BAD))
+        self.conn_pill.setToolTip("Mouse not detected. Searching for connection…")
         self.battery.setText("")
         self.dpi_readout.setText("—")
         self.rate_readout.setText("—")
@@ -763,7 +769,7 @@ class MainWindow(QMainWindow):
         # the device is write-only for config, so push the active profile now so
         # the hardware matches our persisted settings (mirrors the official app).
         # force=True: on connect the device state is unknown, push every section.
-        if self._current_config is not None:
+        if info.get("configurable", True) and self._current_config is not None:
             self.apply_profile(self._current_config, force=True)
 
     def _on_error(self, msg):
@@ -799,7 +805,7 @@ class MainWindow(QMainWindow):
 
     def _on_charging(self, charging):
         # over 2.4GHz the push tells us; wired stays True regardless
-        if self.ctrl._dev.connection != "wired":
+        if getattr(self.ctrl._dev, "connection", None) != "wired":
             self._charging = charging
             if self._battery is not None:
                 self.topbar.set_battery(self._battery, charging=self._charging)
@@ -808,7 +814,10 @@ class MainWindow(QMainWindow):
     def _on_alive(self, alive):
         if alive:
             # restore the normal connection pill + the readouts set_offline() cleared
-            self.topbar.set_connection({"connection": self.ctrl._dev.connection})
+            self.topbar.set_connection({
+                "connection": getattr(self.ctrl._dev, "connection", None),
+                "configurable": getattr(self.ctrl._dev, "configurable", True),
+            })
             if self._battery is not None:
                 self.topbar.set_battery(self._battery, charging=self._charging)
             if self._cur_dpi is not None:
@@ -816,7 +825,10 @@ class MainWindow(QMainWindow):
             if self._cur_rate is not None:
                 self.topbar.set_rate_readout(self._cur_rate)
         else:
-            self.topbar.set_offline()
+            if getattr(self.ctrl._dev, "connection", None) == "2.4GHz":
+                self.topbar.set_offline()
+            else:
+                self.topbar.set_disconnected()
 
     def _on_runapp(self, code):
         """A host-side Run-APP button was pressed (report-04 byte[7]=code). Map
