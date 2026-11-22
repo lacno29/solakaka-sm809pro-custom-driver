@@ -10,7 +10,7 @@ Nav order (user-chosen): Buttons, Macro, DPI, Lighting, Performance.
 """
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QIcon, QPixmap, QPainter, QColor, QGuiApplication
+from PySide6.QtGui import QAction, QIcon, QPixmap, QPainter, QColor, QGuiApplication, QPen
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QListWidget,
     QListWidgetItem, QStackedWidget, QFrame, QLabel, QPushButton, QMessageBox,
@@ -32,6 +32,17 @@ from .panels.profiles_panel import ProfilesPanel
 from .macro_store import MacroStore
 from .profile_store import ProfileStore, default_config
 from .autoswitch import AutoSwitcher
+from .jiggler import (
+    MouseJiggler,
+    DEFAULT_MODE as JIGGLER_DEFAULT_MODE,
+    DEFAULT_PERIOD as JIGGLER_DEFAULT_PERIOD,
+    DEFAULT_DISTANCE as JIGGLER_DEFAULT_DISTANCE,
+    DEFAULT_RANDOM as JIGGLER_DEFAULT_RANDOM,
+    DEFAULT_RESPECT_LOCK as JIGGLER_DEFAULT_RESPECT_LOCK,
+    DEFAULT_HOTKEY as JIGGLER_DEFAULT_HOTKEY,
+    DEFAULT_AUTOSTART as JIGGLER_DEFAULT_AUTOSTART,
+)
+from .widgets.jiggler_dialog import JigglerSettingsDialog
 from .widgets.overlay import Overlay, AlertOverlay, POSITIONS, POSITION_LABELS
 from .paths import resource_path
 from .widgets.action_picker import set_macro_resolver
@@ -127,7 +138,7 @@ class TopBar(QFrame):
 
     def set_connection(self, info):
         conn = info.get("connection", "?")
-        label = {"2.4GHz": "2.4 GHz", "wired": "USB Wired", "bluetooth": "Bluetooth"}.get(conn, conn)
+        label = {"2.4GHz": "2.4 GHz", "wired": "USB Wired", "bluetooth": "bluetooth"}.get(conn, conn)
         self.conn_pill.setText(f"● {label}")
         self.conn_pill.setStyleSheet(self._conn_style(theme.GOOD))
         self._conn_label = label
@@ -140,7 +151,7 @@ class TopBar(QFrame):
         # dongle/cable present but the mouse isn't responding
         self.conn_pill.setText("● mouse offline")
         self.conn_pill.setStyleSheet(self._conn_style(theme.WARN))
-        self.conn_pill.setToolTip("2.4GHz dongle is plugged in, but mouse is offline or switched to Bluetooth.")
+        self.conn_pill.setToolTip("2.4GHz dongle is plugged in, but mouse is offline or switched to bluetooth.")
         self.battery.setText("")
         self.dpi_readout.setText("—")
         self.rate_readout.setText("—")
@@ -191,7 +202,7 @@ class TopBar(QFrame):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, start_jiggling=False):
         super().__init__()
         self.setWindowTitle("SOLAKAKA SM809 Pro - Custom Driver")
         self.setWindowIcon(app_icon())
@@ -368,11 +379,40 @@ class MainWindow(QMainWindow):
                                   lambda: self._applied_id)
         self._auto.set_base(self._applied_id)
         self._auto.switched.connect(self._on_auto_switched)
+
+        # mouse jiggler (tray-controlled idle preventer)
+        self._suppress_jiggler_overlay = False
+        self._jiggler_dlg = None
+        jiggler_hotkey = bool(self.profiles.get_setting("jiggler_hotkey", JIGGLER_DEFAULT_HOTKEY))
+        self._jiggler = MouseJiggler(hotkey_enabled=jiggler_hotkey, parent=self)
+        self._jiggler.configure(
+            mode=self.profiles.get_setting("jiggler_mode", JIGGLER_DEFAULT_MODE),
+            period=self.profiles.get_setting("jiggler_period", JIGGLER_DEFAULT_PERIOD),
+            distance=self.profiles.get_setting("jiggler_distance", JIGGLER_DEFAULT_DISTANCE),
+            random_timer=bool(self.profiles.get_setting("jiggler_random", JIGGLER_DEFAULT_RANDOM)),
+            respect_locked_state=bool(
+                self.profiles.get_setting("jiggler_respect_lock", JIGGLER_DEFAULT_RESPECT_LOCK)
+            ),
+            hotkey_enabled=jiggler_hotkey,
+        )
+        self._jiggler.enabled_changed.connect(self._on_jiggler_enabled_changed)
+        self._jiggler.status_changed.connect(self._update_tray_jiggler_state)
+
         self._setup_tray()
         if self.profiles.get_setting("auto_switch", False):
             self._auto.set_enabled(True)
             self._sync_autoswitch_ui(True)
         self._sync_overlay_ui(self._overlay_enabled)
+
+        if start_jiggling or bool(
+            self.profiles.get_setting("jiggler_autostart", JIGGLER_DEFAULT_AUTOSTART)
+        ):
+            self._suppress_jiggler_overlay = True
+            try:
+                self._jiggler.set_enabled(True)
+            finally:
+                self._suppress_jiggler_overlay = False
+        self._update_tray_jiggler_state()
 
         self.ctrl.start()
 
@@ -766,6 +806,18 @@ class MainWindow(QMainWindow):
         # Wired is always "charging". Over 2.4GHz, charging is reported live by
         # the status push (see _on_charging); start from not-charging there.
         self._charging = (info.get("connection") == "wired")
+        # Seed TopBar readouts from active profile so they display immediately
+        if self._current_config:
+            dpi_cfg = self._current_config.get("dpi", {})
+            vals = dpi_cfg.get("values", [])
+            sel = dpi_cfg.get("selected", 0)
+            if vals and 0 <= sel < len(vals):
+                self._cur_dpi = vals[sel]
+                self.topbar.set_dpi_readout(f"{self._cur_dpi}")
+            rate = self._current_config.get("polling_hz")
+            if rate:
+                self._cur_rate = rate
+                self.topbar.set_rate_readout(self._cur_rate)
         # the device is write-only for config, so push the active profile now so
         # the hardware matches our persisted settings (mirrors the official app).
         # force=True: on connect the device state is unknown, push every section.
@@ -982,21 +1034,34 @@ class MainWindow(QMainWindow):
                 self.profiles.set_config(self.profiles.active_id, cfg)
 
     # -- auto-switch + tray ---------------------------------------------------
-    def _tray_icon(self):
+    def _tray_icon(self, jiggler_state="off"):
         """The app icon for the tray; falls back to a painted accent dot if the
-        icon file can't be loaded."""
+        icon file can't be loaded. Composites a status dot badge when jiggling."""
         ic = app_icon()
-        if not ic.isNull():
-            return ic
-        pm = QPixmap(32, 32)
-        pm.fill(QColor(theme.BG))
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setBrush(QColor(theme.ACCENT))
-        p.setPen(QColor(theme.ACCENT))
-        p.drawEllipse(8, 8, 16, 16)
-        p.end()
-        return QIcon(pm)
+        if ic.isNull():
+            pm = QPixmap(32, 32)
+            pm.fill(QColor(theme.BG))
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setBrush(QColor(theme.ACCENT))
+            p.setPen(QColor(theme.ACCENT))
+            p.drawEllipse(8, 8, 16, 16)
+            p.end()
+            ic = QIcon(pm)
+        if jiggler_state in ("active", "paused"):
+            pm = ic.pixmap(32, 32)
+            if pm.isNull():
+                pm = QPixmap(32, 32)
+                pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing)
+            dot_color = QColor(theme.GOOD if jiggler_state == "active" else theme.WARN)
+            p.setPen(QPen(QColor(theme.BG), 2))
+            p.setBrush(dot_color)
+            p.drawEllipse(19, 19, 11, 11)
+            p.end()
+            return QIcon(pm)
+        return ic
 
     def _setup_tray(self):
         self.tray = None
@@ -1006,7 +1071,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QApplication
         QApplication.setQuitOnLastWindowClosed(False)
         self.tray = QSystemTrayIcon(self._tray_icon(), self)
-        self.tray.setToolTip("SM809 Pro — Custom Driver")
+        self.tray.setToolTip("SM809 Pro \u2014 Custom Driver")
         menu = QMenu()
         menu.addAction("Show window", self._show_from_tray)
 
@@ -1021,7 +1086,12 @@ class MainWindow(QMainWindow):
         self.tray_overlay = QAction("Show on-screen overlay", self, checkable=True)
         self.tray_overlay.toggled.connect(self._toggle_overlay)
         menu.addAction(self.tray_overlay)
-        menu.addAction("Overlay settings…", self._overlay_settings)
+        menu.addAction("Overlay settings\u2026", self._overlay_settings)
+        menu.addSeparator()
+        self.tray_jiggler = QAction("Enable mouse jiggler", self, checkable=True)
+        self.tray_jiggler.toggled.connect(self._toggle_jiggler)
+        menu.addAction(self.tray_jiggler)
+        menu.addAction("Mouse jiggler settings\u2026", self._jiggler_settings)
         menu.addSeparator()
         from . import autostart
         if autostart.supported():
@@ -1098,6 +1168,79 @@ class MainWindow(QMainWindow):
             act.blockSignals(True)
             act.setChecked(bool(on))
             act.blockSignals(False)
+
+    def _toggle_jiggler(self, on):
+        if getattr(self, "_jiggler", None) is None:
+            return
+        self._jiggler.set_enabled(bool(on))
+
+    def _on_jiggler_enabled_changed(self, on):
+        self._update_tray_jiggler_state()
+        if self._overlay_enabled and not getattr(self, "_suppress_jiggler_overlay", False):
+            val = f"ON \u00b7 {self._jiggler.mode}" if on else "OFF"
+            self.overlay.flash_lines([("Mouse Jiggler", val)])
+
+    def _update_tray_jiggler_state(self):
+        j = getattr(self, "_jiggler", None)
+        if j is None:
+            return
+        act = getattr(self, "tray_jiggler", None)
+        if act is not None and act.isChecked() != j.enabled:
+            act.blockSignals(True)
+            act.setChecked(j.enabled)
+            act.blockSignals(False)
+        if getattr(self, "tray", None) is not None:
+            if not j.enabled:
+                state = "off"
+            elif j.is_paused_locked:
+                state = "paused"
+            else:
+                state = "active"
+            self.tray.setIcon(self._tray_icon(state))
+            self.tray.setToolTip(j.tray_tooltip())
+
+    def _jiggler_settings(self):
+        """Configure the Mouse Jiggler mode, interval, distance, and behavior."""
+        if self._jiggler_dlg is not None:
+            self._jiggler_dlg.raise_()
+            self._jiggler_dlg.activateWindow()
+            return
+        autostart = bool(
+            self.profiles.get_setting("jiggler_autostart", JIGGLER_DEFAULT_AUTOSTART)
+        )
+        dlg = JigglerSettingsDialog(self._jiggler, autostart=autostart, parent=self)
+        self._jiggler_dlg = dlg
+        QTimer.singleShot(
+            0,
+            lambda: (dlg.raise_(), dlg.activateWindow())
+            if self._jiggler_dlg is dlg
+            else None,
+        )
+        try:
+            if dlg.exec() != QDialog.Accepted:
+                return
+            vals = dlg.values()
+        finally:
+            self._jiggler_dlg = None
+        self.profiles.set_setting("jiggler_mode", vals["mode"])
+        self.profiles.set_setting("jiggler_period", vals["period"])
+        self.profiles.set_setting("jiggler_distance", vals["distance"])
+        self.profiles.set_setting("jiggler_random", vals["random_timer"])
+        self.profiles.set_setting("jiggler_respect_lock", vals["respect_locked_state"])
+        self.profiles.set_setting("jiggler_hotkey", vals["hotkey_enabled"])
+        self.profiles.set_setting("jiggler_autostart", vals["autostart"])
+        self._jiggler.configure(
+            mode=vals["mode"],
+            period=vals["period"],
+            distance=vals["distance"],
+            random_timer=vals["random_timer"],
+            respect_locked_state=vals["respect_locked_state"],
+            hotkey_enabled=vals["hotkey_enabled"],
+        )
+        if vals["enabled"] != self._jiggler.enabled:
+            self._toggle_jiggler(vals["enabled"])
+        else:
+            self._update_tray_jiggler_state()
 
     def _overlay_settings(self):
         """Configure what the overlay shows + its position / transparency / size."""
@@ -1208,16 +1351,18 @@ class MainWindow(QMainWindow):
             self._apply_overlay_appearance()      # revert preview tweaks to saved
 
     def closeEvent(self, e):
-        # with a tray icon, closing hides to tray (keeps auto-switch running)
+        # with a tray icon, closing hides to tray (keeps background features active)
         if self.tray is not None and not getattr(self, "_force_quit", False):
             e.ignore()
             self.hide()
             self.tray.showMessage(
-                "Still running", "Auto-switch stays active. Quit from the tray icon.",
+                "Still running", "Still running in the tray. Quit from the tray icon.",
                 QSystemTrayIcon.Information, 2000)
             return
         if self._auto is not None:
             self._auto.set_enabled(False)
+        if getattr(self, "_jiggler", None) is not None:
+            self._jiggler.shutdown()
         if self.tray is not None:
             self.tray.hide()
         if getattr(self, "overlay", None) is not None:

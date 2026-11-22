@@ -10,6 +10,7 @@ the packet builder, so it is trivially testable and portable.
 VID = 0x04F3                 # Elan
 PID_WIRELESS = 0x026F        # 2.4GHz dongle
 PID_WIRED = 0x026E           # USB wired
+PID_BLUETOOTH = 0x026D       # Bluetooth BLE
 # (anything else on this VID = Bluetooth)
 
 # --- Report IDs / framing ---------------------------------------------------

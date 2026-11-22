@@ -86,5 +86,6 @@ $RECYCLE.BIN/
 *.bak
 *.tmp
 *.log
+scratch/
 CLAUDE.md
 journal.txt

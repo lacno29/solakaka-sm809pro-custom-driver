@@ -48,6 +48,13 @@ The official vendor software is clunky and lacks automatic game/application dete
 - Minimizes quietly to the Windows system tray.
 - Single-instance enforcement with seamless handoff when relaunched.
 
+### 🖱️ Built-in Mouse Jiggler (System Tray)
+- **Tray Control**: Right-click the system tray icon to toggle **Enable mouse jiggler** or open **Mouse jiggler settings…** (with a live tray icon status badge and tooltip).
+- **Four Modes**: **Normal** (diagonal), **Zen** (virtual 0 px input that resets OS idle without moving the cursor), **Circle** (8-step pattern), and **Linear** (horizontal).
+- **Interval & Distance**: Configurable `1`–`10800` s interval (with optional randomization from `1 s` to the configured interval) and `1`–`120`× distance multiplier, plus a **Test jiggle** button.
+- **Smart & Sleep-Safe**: Automatically skips ticks while you are moving the mouse, prevents display/system sleep while active (`SetThreadExecutionState`), recovers on Modern Standby wake, and optionally pauses while Windows is locked.
+- **Global Hotkey & CLI**: Toggle anytime via `Ctrl+Shift+J` (toggleable in settings), start active via `--jiggle`, or stop a running instance cleanly from Task Scheduler via `--stop-jiggling`.
+
 ---
 
 ## ⏱️ Profile Switching & Hardware Timing (Disclaimer & Tip)
@@ -89,6 +96,10 @@ Because the SM809 Pro's microcontroller is stateful and communicates over USB HI
 
 ```bash
 python run_app.py
+# Optional flags:
+#   --minimized / --tray   Start minimized in the system tray
+#   --jiggle               Start with Mouse Jiggler enabled
+#   --stop-jiggling        Signal an already-running instance to stop jiggling and exit
 ```
 
 ### Running Tests
@@ -96,8 +107,11 @@ python run_app.py
 Run the test suite offline (no mouse hardware required):
 
 ```bash
-# Offline framing and protocol encoding tests (37 tests)
+# Offline framing and protocol encoding tests
 python tests/test_offline.py
+
+# Mouse Jiggler unit, Win32 ABI, dialog, and IPC tests
+python tests/test_jiggler.py
 
 # Headless GUI, profile store, .psf import, and auto-switch tests
 python tests/test_gui_headless.py
@@ -135,11 +149,12 @@ SM809ProApp/
 │   ├── controller.py     # Background device controller thread with Qt signals
 │   ├── main_window.py    # Main window shell, navigation rail, and system tray logic
 │   ├── autoswitch.py     # Foreground window monitor and profile auto-switch rules
+│   ├── jiggler.py        # Mouse Jiggler engine (SendInput, sleep lock, lock/resume, hotkey)
 │   ├── profile_store.py  # JSON profile serializer and persistence manager
 │   ├── psf_import.py     # Parser for official OEM .psf profiles
 │   ├── theme.py          # Dark stylesheet styling ("Precision Instrument" theme)
 │   ├── panels/           # UI panels (Buttons, Macros, DPI, Lighting, Performance, Auto-Switch, Profiles)
-│   └── widgets/          # Reusable UI components (Action picker, color selector, overlay HUD)
+│   └── widgets/          # Reusable UI components (Action picker, color selector, overlay HUD, jiggler dialog)
 ├── config/               # Default profile and macro configurations (profiles.json, macros.json)
 ├── tests/                # Automated offline and offscreen headless test suites
 ├── build_exe.bat         # Windows build script for PyInstaller

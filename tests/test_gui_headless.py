@@ -627,11 +627,11 @@ check("macro choices has Menu", 0x65 in macro_key_codes)
 
 # TopBar connection UI tests for Bluetooth
 w.topbar.set_connection({"connection": "bluetooth", "configurable": True})
-check("TopBar Bluetooth (configurable) text", w.topbar.conn_pill.text() == "● Bluetooth")
-check("TopBar Bluetooth (configurable) tooltip", "Connected via Bluetooth" in w.topbar.conn_pill.toolTip())
+check("TopBar Bluetooth (configurable) text", w.topbar.conn_pill.text() == "● bluetooth")
+check("TopBar Bluetooth (configurable) tooltip", "Connected via bluetooth" in w.topbar.conn_pill.toolTip())
 
 w.topbar.set_connection({"connection": "bluetooth", "configurable": False})
-check("TopBar Bluetooth (read-only) text", w.topbar.conn_pill.text() == "● Bluetooth")
+check("TopBar Bluetooth (read-only) text", w.topbar.conn_pill.text() == "● bluetooth")
 check("TopBar Bluetooth (read-only) tooltip mentions read-only", "read-only" in w.topbar.conn_pill.toolTip())
 
 w.topbar.set_disconnected()
@@ -716,6 +716,70 @@ _app_ctrl.StatusListener = old_status_cls
 ctrl.shutdown()
 dlg.close()
 
+# Mouse Jiggler MainWindow integration tests
+from app.jiggler import NullJigglerBackend as _NullJB
+check("MainWindow owns _jiggler", hasattr(w, "_jiggler") and w._jiggler is not None)
+check("offscreen MainWindow jiggler uses NullJigglerBackend",
+      isinstance(w._jiggler._backend, _NullJB))
+check("jiggler defaults to OFF on launch", w._jiggler.enabled is False)
+check("tray_icon off/active/paused non-null",
+      not w._tray_icon("off").isNull()
+      and not w._tray_icon("active").isNull()
+      and not w._tray_icon("paused").isNull())
+
+# Toggle jiggler + overlay HUD feedback
+w._overlay_enabled = True
+w.overlay.hide()
+w._toggle_jiggler(True)
+check("toggle jiggler ON enables jiggler", w._jiggler.enabled is True)
+check("toggle jiggler ON flashes overlay",
+      w.overlay.isVisible()
+      and w.overlay._lay.itemAt(0).widget().text() == "MOUSE JIGGLER"
+      and "ON" in w.overlay._lay.itemAt(1).widget().text())
+w.overlay.hide()
+w._toggle_jiggler(False)
+check("toggle jiggler OFF disables jiggler", w._jiggler.enabled is False)
+check("toggle jiggler OFF flashes overlay OFF",
+      w.overlay.isVisible() and w.overlay._lay.itemAt(1).widget().text() == "OFF")
+w._overlay_enabled = False
+w.overlay.hide()
+
+# Persistence + reload into fresh MainWindow (autostart=True and start_jiggling=True)
+import app.profile_store as _PS4
+_PS4.default_path = lambda: _ps_path + ".jg"
+wj1 = MainWindow()
+wj1.profiles.set_setting("jiggler_mode", "Circle")
+wj1.profiles.set_setting("jiggler_period", 45)
+wj1.profiles.set_setting("jiggler_distance", 4)
+wj1.profiles.set_setting("jiggler_random", True)
+wj1.profiles.set_setting("jiggler_respect_lock", True)
+wj1.profiles.set_setting("jiggler_hotkey", False)
+wj1.profiles.set_setting("jiggler_autostart", True)
+wj1._force_quit = True
+wj1.close()
+
+wj2 = MainWindow()
+check("jiggler settings reload mode/period/distance",
+      wj2._jiggler.mode == "Circle" and wj2._jiggler.period == 45 and wj2._jiggler.distance == 4)
+check("jiggler settings reload flags",
+      wj2._jiggler.random_timer is True
+      and wj2._jiggler.respect_locked_state is True
+      and wj2._jiggler.hotkey_enabled is False)
+check("jiggler_autostart=True enables jiggler on launch", wj2._jiggler.enabled is True)
+wj2._force_quit = True
+wj2.close()
+check("closeEvent force_quit shuts down jiggler", wj2._jiggler.enabled is False)
+
+# start_jiggling=True (--jiggle CLI flag) overrides autostart=False without overlay flash
+wj2.profiles.set_setting("jiggler_autostart", False)
+wj2.profiles.set_setting("overlay", True)
+wj3 = MainWindow(start_jiggling=True)
+check("start_jiggling=True enables jiggler on launch", wj3._jiggler.enabled is True)
+check("start_jiggling=True suppresses startup overlay flash", not wj3.overlay.isVisible())
+wj3._force_quit = True
+wj3.close()
+
+w3._jiggler.shutdown()
 w.ctrl.shutdown()
 w.close()
 print(f"\n{('ALL GOOD' if fails == 0 else str(fails) + ' FAILED')}")

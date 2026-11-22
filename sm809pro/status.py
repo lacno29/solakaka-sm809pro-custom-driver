@@ -21,14 +21,91 @@ except Exception:  # pragma: no cover - hid is required at runtime
 from . import protocol as P
 
 
+def get_bluetooth_battery(serial=None) -> int | None:
+    """
+    On Windows, query SetupAPI for the Bluetooth Low Energy device's battery percentage.
+    Returns integer percent (0..100) if found, else None.
+    """
+    import sys
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        import uuid
+        from ctypes import wintypes, c_void_p
+
+        setupapi = ctypes.windll.setupapi
+        setupapi.SetupDiGetClassDevsW.restype = c_void_p
+        setupapi.SetupDiGetClassDevsW.argtypes = [c_void_p, wintypes.LPCWSTR, wintypes.HWND, wintypes.DWORD]
+        setupapi.SetupDiEnumDeviceInfo.argtypes = [c_void_p, wintypes.DWORD, c_void_p]
+        setupapi.SetupDiGetDeviceInstanceIdW.argtypes = [c_void_p, c_void_p, wintypes.LPWSTR, wintypes.DWORD, c_void_p]
+        setupapi.SetupDiDestroyDeviceInfoList.argtypes = [c_void_p]
+        setupapi.SetupDiGetDevicePropertyW.argtypes = [
+            c_void_p, c_void_p, c_void_p, c_void_p, c_void_p, wintypes.DWORD, c_void_p, wintypes.DWORD
+        ]
+
+        class SP_DEVINFO_DATA(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("ClassGuid", ctypes.c_ubyte * 16),
+                ("DevInst", wintypes.DWORD),
+                ("Reserved", ctypes.c_size_t),
+            ]
+
+        class DEVPROPKEY(ctypes.Structure):
+            _fields_ = [("fmtid", ctypes.c_ubyte * 16), ("pid", wintypes.DWORD)]
+
+        u = uuid.UUID("{104ea319-6ee2-4701-bd47-8ddbf425bbe5}")
+        raw = (ctypes.c_ubyte * 16)(*u.bytes_le)
+        battery_key = DEVPROPKEY(raw, 2)
+
+        # DIGCF_PRESENT = 2, DIGCF_ALLCLASSES = 4
+        h = setupapi.SetupDiGetClassDevsW(None, "BTHLE", None, 2 | 4)
+        if not h or h == c_void_p(-1).value:
+            return None
+
+        devinfo = SP_DEVINFO_DATA()
+        devinfo.cbSize = ctypes.sizeof(SP_DEVINFO_DATA)
+        idx = 0
+        battery = None
+        target_serial = serial.upper().replace(":", "") if serial else None
+
+        while setupapi.SetupDiEnumDeviceInfo(h, idx, ctypes.byref(devinfo)):
+            idx += 1
+            buf = (ctypes.c_wchar * 512)()
+            if setupapi.SetupDiGetDeviceInstanceIdW(h, ctypes.byref(devinfo), buf, 512, None):
+                inst = buf.value.upper()
+                if target_serial:
+                    if target_serial not in inst:
+                        continue
+                elif "SM809" not in inst and "026D" not in inst and "RIVIERAWAVES" not in inst:
+                    continue
+
+                prop_type = wintypes.DWORD()
+                val_buf = (ctypes.c_byte * 256)()
+                if setupapi.SetupDiGetDevicePropertyW(
+                    h, ctypes.byref(devinfo), ctypes.byref(battery_key),
+                    ctypes.byref(prop_type), val_buf, 256, None, 0
+                ):
+                    val = val_buf[0]
+                    if 0 <= val <= 100:
+                        battery = val
+                        break
+
+        setupapi.SetupDiDestroyDeviceInfoList(h)
+        return battery
+    except Exception:
+        return None
+
+
 def find_status_interface(vid=P.VID, pid=None):
     """
-    Return the hid enumeration dict for the status-push interface (Col04), or
-    None. Col04 = the LOWER of the two usage_page 0x0A collections.
+    Return the hid enumeration dict for the status-push interface (Col04/Col05), or
+    None. Status interface = the LOWER of the two usage_page 0x0A collections.
     """
     if hid is None:
         return None
-    pids = [pid] if pid else [P.PID_WIRELESS, P.PID_WIRED]
+    pids = [pid] if pid else [P.PID_WIRELESS, P.PID_WIRED, getattr(P, "PID_BLUETOOTH", 0x026D)]
     for p in pids:
         devs = hid.enumerate(vid, p)
         zero_a = [d for d in devs if d.get("usage_page") == 0x000A]
@@ -39,7 +116,7 @@ def find_status_interface(vid=P.VID, pid=None):
                 m = re.search(r"Col(\d+)", s)
                 return int(m.group(1)) if m else 99
             zero_a.sort(key=coln)
-            return zero_a[0]  # Col04
+            return zero_a[0]  # Col04/Col05 (lower 0x0A collection)
     return None
 
 
@@ -63,8 +140,8 @@ class StatusListener(threading.Thread):
     """
 
     def __init__(self, on_change=None, on_battery=None, on_alive=None,
-                 on_charging=None, on_runapp=None, vid=P.VID, pid=None, poll_ms=200,
-                 stale_after=8.0):
+                 on_charging=None, on_runapp=None, vid=P.VID, pid=None,
+                 connection=None, poll_ms=200, stale_after=8.0):
         super().__init__(daemon=True)
         self.on_change = on_change
         self.on_battery = on_battery
@@ -74,6 +151,7 @@ class StatusListener(threading.Thread):
         self._last_runapp = 0
         self.vid = vid
         self.pid = pid
+        self.connection = connection
         self.poll_ms = poll_ms
         self.stale_after = stale_after
         self._stop = threading.Event()
@@ -84,6 +162,14 @@ class StatusListener(threading.Thread):
         self._alive = None
         self._charging = None
         self._last_rx = 0.0
+
+    @property
+    def is_bluetooth(self) -> bool:
+        return (
+            self.connection == "bluetooth"
+            or self.pid == getattr(P, "PID_BLUETOOTH", 0x026D)
+            or (self.pid not in (P.PID_WIRELESS, P.PID_WIRED) and self.pid is not None)
+        )
 
     def open(self) -> bool:
         tgt = find_status_interface(self.vid, self.pid)
@@ -144,10 +230,15 @@ class StatusListener(threading.Thread):
         if self._dev is None and not self.open():
             return
         self._last_rx = time.time()
+        if self.is_bluetooth:
+            self._emit_alive(True)
         while not self._stop.is_set():
             try:
                 r = self._dev.read(32, timeout_ms=self.poll_ms)
             except Exception:
+                if self.is_bluetooth:
+                    self._emit_alive(False)
+                    break
                 r = None
             now = time.time()
             if r and len(r) > P.PUSH_OFF_BATTERY and r[0] == P.REPORT_ID_STATUS_PUSH:
@@ -195,9 +286,11 @@ class StatusListener(threading.Thread):
                             except Exception:
                                 pass
             else:
-                # No push at all for a while -> dongle removed / dead link.
-                if (now - self._last_rx) > self.stale_after:
-                    self._emit_alive(False)
+                # Silence timeout: only apply to 2.4GHz dongle.
+                # Over Bluetooth, reports only arrive on button events, not periodic heartbeats.
+                if not self.is_bluetooth:
+                    if (now - self._last_rx) > self.stale_after:
+                        self._emit_alive(False)
             self._stop.wait(0.01)
 
     def stop(self):

@@ -137,8 +137,9 @@ class DeviceController(QObject):
 
             if ok:
                 self._is_connected = True
+                conn = self._dev.connection
                 info = {
-                    "connection": self._dev.connection,
+                    "connection": conn,
                     "product": (self._dev.interface_info or {}).get("product_string", "SM809 Pro"),
                     "configurable": getattr(self._dev, "configurable", True),
                 }
@@ -160,8 +161,20 @@ class DeviceController(QObject):
                     on_runapp=lambda code: self.runapp_pressed.emit(code),
                     pid=self._dev.pid,
                     vid=self._dev.vid,
+                    connection=conn,
                 )
                 self._status.start()
+
+                # On Bluetooth, immediately query Windows battery percentage
+                if conn == "bluetooth":
+                    serial = (self._dev.interface_info or {}).get("serial_number")
+                    if isinstance(serial, bytes):
+                        serial = serial.decode(errors="ignore")
+                    from sm809pro.status import get_bluetooth_battery
+                    batt = get_bluetooth_battery(serial)
+                    if batt is not None:
+                        self.battery_changed.emit(batt)
+
                 self._last_keepalive = time.time()
                 self._last_mode_check = time.time()
 
@@ -202,7 +215,7 @@ class DeviceController(QObject):
                     self._teardown_device()
                     return
                 if not any(m["connection"] == "bluetooth" for m in modes):
-                    # Bluetooth disconnected / went to sleep
+                    # Bluetooth disconnected / went to sleep / turned off
                     self._teardown_device()
                     return
 
@@ -235,13 +248,19 @@ class DeviceController(QObject):
                 self.command_done.emit(method, False)
             except queue.Empty:
                 break
-        self.busy_changed.emit(False)
+            self.busy_changed.emit(False)
 
     def _on_alive_event(self, alive: bool):
         self.alive_changed.emit(alive)
-        if not alive and getattr(self._dev, "connection", None) == "2.4GHz":
-            # If mouse went offline on 2.4GHz, fast-track mode check on next cycle
-            self._last_mode_check = 0.0
+        conn = getattr(self._dev, "connection", None)
+        if not alive:
+            if conn == "2.4GHz":
+                # If mouse went offline on 2.4GHz, fast-track mode check on next cycle
+                self._last_mode_check = 0.0
+            elif conn == "bluetooth":
+                # On Bluetooth, an offline event means the connection was lost/dropped;
+                # teardown so the controller can auto-reconnect when the mouse wakes/reappears
+                self._teardown_device()
 
     def _on_status_push(self, level, rate, raw):
         # called from the StatusListener thread; Qt signals are thread-safe to emit

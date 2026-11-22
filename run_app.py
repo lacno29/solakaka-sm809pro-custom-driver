@@ -19,31 +19,41 @@ from app.main_window import MainWindow, app_icon
 _INSTANCE_KEY = "SM809Pro_single_instance"
 
 
-def _hand_off_if_running() -> bool:
-    """If another instance is already running, tell it to show and return True."""
+def _hand_off_if_running(payload: bytes = b"show") -> bool:
+    """If another instance is already running, send `payload` to it and return True."""
     sock = QLocalSocket()
     sock.connectToServer(_INSTANCE_KEY)
     if sock.waitForConnected(250):
-        sock.write(b"show")
+        sock.write(payload)
         sock.flush()
-        sock.waitForBytesWritten(250)
+        if sock.bytesToWrite() > 0:
+            sock.waitForBytesWritten(250)
         sock.disconnectFromServer()
+        if sock.state() != QLocalSocket.LocalSocketState.UnconnectedState:
+            sock.waitForDisconnected(100)
         return True
     return False
 
 
 def _listen_for_relaunch(win) -> QLocalServer:
     """Become the primary instance: listen so a future launch can raise our
-    window instead of starting a new copy."""
+    window (or signal commands like --stop-jiggling) instead of starting a new copy."""
     QLocalServer.removeServer(_INSTANCE_KEY)   # clear any stale socket
     server = QLocalServer()
     server.listen(_INSTANCE_KEY)
 
     def _on_new_connection():
         conn = server.nextPendingConnection()
+        data = b""
         if conn is not None:
-            conn.readAll()
+            if conn.bytesAvailable() == 0:
+                conn.waitForReadyRead(100)
+            data = bytes(conn.readAll()).strip()
             conn.disconnectFromServer()
+        if data == b"stop-jiggling":
+            if hasattr(win, "_toggle_jiggler"):
+                win._toggle_jiggler(False)
+            return
         # restore from tray + bring to the foreground
         if hasattr(win, "_show_from_tray"):
             win._show_from_tray()
@@ -65,15 +75,21 @@ def main():
     app.setApplicationName("SM809 Pro")
     app.setWindowIcon(app_icon())
 
+    # --stop-jiggling signals a running instance to stop without opening a window
+    if "--stop-jiggling" in sys.argv:
+        ok = _hand_off_if_running(b"stop-jiggling")
+        sys.exit(0 if ok else 1)
+
     # if we're a second launch, surface the running instance and quit
-    if _hand_off_if_running():
+    if _hand_off_if_running(b"show"):
         return
 
     pal = theme.dark_palette()
     if pal is not None:
         app.setPalette(pal)
     app.setStyleSheet(theme.stylesheet())
-    win = MainWindow()
+    start_jiggling = ("--jiggle" in sys.argv)
+    win = MainWindow(start_jiggling=start_jiggling)
     win._single_instance_server = _listen_for_relaunch(win)   # keep a reference
     # --minimized / --tray (used by "Start with Windows"): stay in the tray on
     # launch. Only honoured when a tray exists, else show so it's not unreachable.
